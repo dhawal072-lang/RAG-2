@@ -5,11 +5,10 @@ __pycache__/
 .env
 *.log
 .DS_Store
-
+.env.local
 data/pdfs/*
 data/indexes/*
 data/summaries/*
-
 models/
 node_modules/
 .next/

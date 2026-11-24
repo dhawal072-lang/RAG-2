@@ -1,91 +1,86 @@
+
 import json
-import os
-import tempfile
 from pathlib import Path
 
+from src.ingestion.index_scanner import discover_documents
+from src.ingestion.pdf_loader import extract_pdf
+from src.ingestion.chunker import chunk_pdf
 from src.db.manifest import (
-    initialize_manifest,
     get_pending_documents,
     update_document_status,
 )
-from src.ingestion.pdf_loader import extract_pdf
-from src.ingestion.chunker import chunk_pdf
+from src.services.summary_service import SummaryService
 
 
-CHUNK_STORAGE = Path("data/indexes/chunks")
+CHUNK_DIRECTORY = Path("data/indexes/chunks")
 
 
-def save_chunks(document_id, chunks):
-    CHUNK_STORAGE.mkdir(parents=True, exist_ok=True)
+def main():
+    CHUNK_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
-    output_path = CHUNK_STORAGE / f"{document_id}.json"
+    summary_service = SummaryService()
 
-    fd, temporary_path = tempfile.mkstemp(
-        dir=CHUNK_STORAGE,
-        suffix=".tmp"
-    )
+    print("Discovering PDF documents...")
+    discover_documents("data/pdfs")
 
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(chunks, file, ensure_ascii=False, indent=2)
+    pending_documents = get_pending_documents()
 
-        os.replace(temporary_path, output_path)
-
-    except Exception:
-        if os.path.exists(temporary_path):
-            os.remove(temporary_path)
-        raise
-
-    return output_path
-
-
-def process_documents():
-    initialize_manifest()
-    documents = get_pending_documents()
-
-    if not documents:
-        print("No pending documents to process.")
+    if not pending_documents:
+        print("No pending documents found.")
         return
 
-    print(f"Found {len(documents)} document(s) to process.")
-
-    for document in documents:
+    for document in pending_documents:
+        document_id = document["document_id"]
         file_path = document["file_path"]
         filename = document["filename"]
-        document_id = document["document_id"]
-
-        print(f"\nProcessing: {filename}")
 
         try:
+            print(f"\nProcessing: {filename}")
+
             update_document_status(file_path, "processing")
 
             extracted = extract_pdf(file_path)
             chunks = chunk_pdf(extracted)
+            pages = extracted["pages"]
 
-            output_path = save_chunks(document_id, chunks)
+            chunks = chunk_pages(pages)
+
+            for chunk in chunks:
+                chunk["document_id"] = document_id
+                chunk["filename"] = filename
+
+            chunk_path = CHUNK_DIRECTORY / f"{document_id}.json"
+
+            with chunk_path.open("w", encoding="utf-8") as file:
+                json.dump(chunks, file, indent=4, ensure_ascii=False)
+
+            print(f"Saved {len(chunks)} chunks.")
+
+            summary = summary_service.generate_summary(
+                document_id=document_id,
+                filename=filename,
+                chunks=chunks
+            )
+
+            print("Summary saved:", summary["filename"])
 
             update_document_status(
                 file_path,
                 "completed",
                 pages=extracted["total_pages"],
-                chunks=len(chunks),
+                chunks=len(chunks)
             )
 
-            print(f"  Pages: {extracted['total_pages']}")
-            print(f"  Chunks: {len(chunks)}")
-            print(f"  Saved: {output_path}")
-            print("  Status: completed")
+            print(f"Completed: {filename}")
 
         except Exception as error:
             update_document_status(
                 file_path,
                 "failed",
-                error=str(error),
+                error=str(error)
             )
-
-            print(f"  Status: failed")
-            print(f"  Error: {error}")
+            print(f"Failed: {filename} — {error}")
 
 
 if __name__ == "__main__":
-    process_documents()
+    main()
